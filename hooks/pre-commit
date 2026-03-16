@@ -1,0 +1,13 @@
+#!/bin/sh
+# Pre-commit hook: formatting and lint checks.
+# Install with: deno task setup-hooks
+
+set -e
+
+echo "► deno fmt --check"
+deno fmt --check
+
+echo "► deno lint"
+deno lint
+
+echo "✓ pre-commit checks passed"

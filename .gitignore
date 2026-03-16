@@ -1,1 +1,11 @@
+# Deno cache
 .deno/
+
+# Test coverage output
+coverage/
+
+# Local scratch files
+main.ts
+tenancy.xlsx
+workspace*.csv
+*.csv

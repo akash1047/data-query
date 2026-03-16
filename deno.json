@@ -1,11 +1,40 @@
 {
-  "name": "@aksh1047/data-query",
+  "name": "@akash1047/data-query",
   "version": "0.1.0",
   "exports": "./mod.ts",
   "tasks": {
-    "test": "deno test"
+    "test": "deno test --allow-read --allow-write tests/",
+    "bench": "deno bench benchmarks/",
+    "coverage": "deno test --allow-read --allow-write --coverage=coverage tests/ && deno coverage coverage --include=\"src/\"",
+    "setup-hooks": "cp hooks/pre-commit .git/hooks/pre-commit && cp hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-commit .git/hooks/pre-push && echo 'Git hooks installed.'"
+  },
+  "fmt": {
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "semiColons": true,
+    "singleQuote": false,
+    "include": ["src/", "mod.ts", "tests/", "benchmarks/"]
+  },
+  "lint": {
+    "include": ["src/", "mod.ts", "tests/", "benchmarks/"],
+    "rules": {
+      "tags": ["recommended"]
+    }
   },
   "imports": {
-    "@std/assert": "jsr:@std/assert@1"
+    "@std/assert": "jsr:@std/assert@1",
+    "xlsx": "npm:xlsx",
+    "zod": "npm:zod@3"
+  },
+  "publish": {
+    "exclude": [
+      "tests/",
+      "benchmarks/",
+      "coverage/",
+      ".github/",
+      "*.xlsx",
+      "*.csv",
+      "main.ts"
+    ]
   }
 }

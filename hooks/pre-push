@@ -1,0 +1,10 @@
+#!/bin/sh
+# Pre-push hook: full test suite.
+# Install with: deno task setup-hooks
+
+set -e
+
+echo "► deno task test"
+deno task test
+
+echo "✓ pre-push checks passed"

@@ -1,4 +1,21 @@
+/**
+ * Aggregation pipeline executor.
+ *
+ * Entry point: `executePipeline(data, pipeline)`
+ *
+ * Each stage receives the output array of the previous stage.
+ * Supported stages:
+ *   $match   — filter documents
+ *   $sort    — sort documents
+ *   $limit   — keep first N documents
+ *   $skip    — skip first N documents
+ *   $project — include or exclude fields
+ *   $group   — group documents and compute accumulators
+ *   $unwind  — flatten an array field into one document per element
+ */
+
 import type {
+  AddFieldsStage,
   FilterQuery,
   GroupAccumulators,
   GroupStage,
@@ -11,6 +28,12 @@ import { matchesFilter } from "./filter.ts";
 
 type Doc = Record<string, unknown>;
 
+/**
+ * Execute a sequence of pipeline stages against `data`.
+ * The input array is not mutated; each stage produces a new array.
+ *
+ * Throws `TypeError` if an unrecognised stage key is encountered.
+ */
 export function executePipeline(data: Doc[], pipeline: PipelineStage[]): Doc[] {
   let working: Doc[] = [...data];
   for (const stage of pipeline) {
@@ -28,17 +51,23 @@ export function executePipeline(data: Doc[], pipeline: PipelineStage[]): Doc[] {
       working = executeGroup(working, stage.$group);
     } else if ("$unwind" in stage) {
       working = executeUnwind(working, stage.$unwind);
+    } else if ("$addFields" in stage) {
+      working = executeAddFields(working, stage.$addFields as AddFieldsStage);
     } else {
-      throw new TypeError(`Unknown aggregation stage: ${JSON.stringify(Object.keys(stage))}`);
+      throw new TypeError(
+        `Unknown aggregation stage: ${JSON.stringify(Object.keys(stage))}`,
+      );
     }
   }
   return working;
 }
 
+/** `$match` — keep only documents that satisfy `filter`. */
 function executeMatch(data: Doc[], filter: FilterQuery<Doc>): Doc[] {
   return data.filter((doc) => matchesFilter(doc, filter));
 }
 
+/** `$sort` — sort documents by the fields described in `spec`. */
 function executeSort(data: Doc[], spec: SortQuery<Doc>): Doc[] {
   const result = [...data];
   result.sort((a, b) => {
@@ -53,6 +82,15 @@ function executeSort(data: Doc[], spec: SortQuery<Doc>): Doc[] {
   return result;
 }
 
+/**
+ * `$project` — reshape documents by including or excluding fields.
+ *
+ * - **Inclusion mode** (any value is `1`): output contains only the listed fields.
+ * - **Exclusion mode** (any value is `0`): output is a shallow copy with listed fields removed.
+ * - Mixing `1` and `0` throws `TypeError`.
+ *
+ * Exported so that `DataQuery#execute` can reuse it for chained `.project()` calls.
+ */
 export function executeProject(data: Doc[], spec: ProjectQuery<Doc>): Doc[] {
   const entries = Object.entries(spec);
   if (entries.length === 0) return data;
@@ -65,6 +103,7 @@ export function executeProject(data: Doc[], spec: ProjectQuery<Doc>): Doc[] {
   }
 
   if (includeEntries.length > 0) {
+    // Inclusion — start with an empty object and add only the specified fields
     return data.map((doc) => {
       const result: Doc = {};
       for (const [path] of includeEntries) {
@@ -76,6 +115,7 @@ export function executeProject(data: Doc[], spec: ProjectQuery<Doc>): Doc[] {
       return result;
     });
   } else {
+    // Exclusion — start with a shallow copy and remove the specified fields
     return data.map((doc) => {
       const result: Doc = { ...doc };
       for (const [path] of excludeEntries) {
@@ -86,6 +126,10 @@ export function executeProject(data: Doc[], spec: ProjectQuery<Doc>): Doc[] {
   }
 }
 
+/**
+ * Write `value` at `path` into `obj`, creating intermediate objects as needed.
+ * Local variant used only within projection output objects.
+ */
 function setNestedInResult(obj: Doc, path: string, value: unknown): void {
   const parts = path.split(".");
   let current = obj;
@@ -98,20 +142,34 @@ function setNestedInResult(obj: Doc, path: string, value: unknown): void {
   current[parts[parts.length - 1]] = value;
 }
 
+/**
+ * Delete the value at `path` from `obj`.
+ * Local variant used only within projection output objects.
+ */
 function deleteNestedInResult(obj: Doc, path: string): void {
   const parts = path.split(".");
   let current = obj;
   for (let i = 0; i < parts.length - 1; i++) {
-    if (typeof current[parts[i]] !== "object" || current[parts[i]] === null) return;
+    if (typeof current[parts[i]] !== "object" || current[parts[i]] === null) {
+      return;
+    }
     current = current[parts[i]] as Doc;
   }
   delete current[parts[parts.length - 1]];
 }
 
+/**
+ * `$group` — partition documents by a grouping key and compute per-group accumulators.
+ *
+ * `stage._id` is the dot-notation field path used as the grouping key.
+ * Use `null` to collect all documents into a single group.
+ * All other fields in `stage` must be `GroupAccumulators` objects.
+ */
 function executeGroup(data: Doc[], stage: GroupStage): Doc[] {
   const groupByPath = stage._id;
-  const groups = new Map<string, Doc[]>();
 
+  // Build a Map from serialised group key → array of documents in that group
+  const groups = new Map<string, Doc[]>();
   for (const doc of data) {
     const keyVal = groupByPath === null
       ? "__all__"
@@ -125,10 +183,12 @@ function executeGroup(data: Doc[], stage: GroupStage): Doc[] {
   const results: Doc[] = [];
 
   for (const [groupKey, groupDocs] of groups) {
+    // The output document always includes `_id` as the group key value
     const result: Doc = {
       _id: groupByPath === null ? null : groupKey,
     };
 
+    // Compute each accumulator field
     for (const [field, accDef] of Object.entries(stage)) {
       if (field === "_id") continue;
       const acc = accDef as GroupAccumulators;
@@ -141,16 +201,24 @@ function executeGroup(data: Doc[], stage: GroupStage): Doc[] {
   return results;
 }
 
+/**
+ * Compute the value of a single accumulator over a group of documents.
+ * Throws `TypeError` for unrecognised accumulator objects.
+ */
 function computeAccumulator(acc: GroupAccumulators, docs: Doc[]): unknown {
   if (acc.$count === true) {
     return docs.length;
   }
   if (acc.$sum !== undefined) {
     if (typeof acc.$sum === "number") {
+      // Constant multiplier — equivalent to counting docs × constant
       return acc.$sum * docs.length;
     }
     const path = acc.$sum as string;
-    return docs.reduce((sum, doc) => sum + ((getNestedValue(doc, path) as number) ?? 0), 0);
+    return docs.reduce(
+      (sum, doc) => sum + ((getNestedValue(doc, path) as number) ?? 0),
+      0,
+    );
   }
   if (acc.$avg !== undefined) {
     const path = acc.$avg;
@@ -168,6 +236,7 @@ function computeAccumulator(acc: GroupAccumulators, docs: Doc[]): unknown {
     return Math.max(...values);
   }
   if (acc.$push !== undefined) {
+    // Collect the field value from every doc in the group into an array
     const path = acc.$push;
     return docs.map((d) => getNestedValue(d, path));
   }
@@ -180,14 +249,75 @@ function computeAccumulator(acc: GroupAccumulators, docs: Doc[]): unknown {
   throw new TypeError(`Unknown accumulator: ${JSON.stringify(acc)}`);
 }
 
+/**
+ * `$addFields` — add or overwrite fields on each document using expressions or literals.
+ *
+ * Supported expressions:
+ * - **Literal** — any non-object value (string, number, boolean, …) is assigned as-is.
+ * - **`$multiply`** — `{ $multiply: [operand, operand, …] }` multiplies all operands.
+ *   Each operand is either a field reference (string starting with `$`) or a numeric constant.
+ *
+ * The original document is shallow-copied; the source array is not mutated.
+ */
+function executeAddFields(data: Doc[], spec: AddFieldsStage): Doc[] {
+  return data.map((doc) => {
+    const result: Doc = { ...doc };
+    for (const [field, expr] of Object.entries(spec)) {
+      result[field] = evaluateAddFieldExpr(doc, expr);
+    }
+    return result;
+  });
+}
+
+/**
+ * Evaluate a single `$addFields` expression against `doc`.
+ * Returns the literal value or the result of the expression operator.
+ */
+function evaluateAddFieldExpr(doc: Doc, expr: unknown): unknown {
+  // Operator expression object
+  if (
+    expr !== null &&
+    typeof expr === "object" &&
+    !Array.isArray(expr) &&
+    Object.keys(expr as object).some((k) => k.startsWith("$"))
+  ) {
+    const exprObj = expr as Record<string, unknown>;
+
+    if ("$multiply" in exprObj) {
+      // Multiply all operands; field refs start with "$"
+      const operands = exprObj.$multiply as (string | number)[];
+      return operands.reduce<number>((product, operand) => {
+        const val = typeof operand === "string" && operand.startsWith("$")
+          ? (getNestedValue(doc, operand.slice(1)) as number) ?? 0
+          : (operand as number);
+        return product * val;
+      }, 1);
+    }
+
+    // Unknown expression operator — return as-is
+    return expr;
+  }
+
+  // Literal value
+  return expr;
+}
+
+/**
+ * `$unwind` — expand an array field so each element becomes its own document.
+ * If the field is not an array the document is passed through unchanged.
+ *
+ * @param path - Dot-notation path to the array field (without a leading `$`).
+ */
 function executeUnwind(data: Doc[], path: string): Doc[] {
   const result: Doc[] = [];
   for (const doc of data) {
     const val = getNestedValue(doc, path);
     if (!Array.isArray(val)) {
+      // Non-array fields pass through unchanged
       result.push(doc);
       continue;
     }
+    // Create one output document per array element
     for (const item of val) {
       const unwound: Doc = { ...doc };
       setNestedInResult(unwound, path, item);
