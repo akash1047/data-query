@@ -23,7 +23,7 @@
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@1",
-    "xlsx": "npm:xlsx",
+    "xlsx": "npm:xlsx@0.18.5",
     "zod": "npm:zod@3"
   },
   "publish": {
